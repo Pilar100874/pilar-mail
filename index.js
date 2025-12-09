@@ -1,108 +1,97 @@
-import fs from "fs";
-import { ImapFlow } from "imapflow";
+import express from "express";
+import cors from "cors";
 import nodemailer from "nodemailer";
 import dotenv from "dotenv";
-import express from "express";
 
 dotenv.config();
 
 const app = express();
+app.use(cors());
 app.use(express.json());
 
-// ========= FUNÇÕES BASE =========
-async function sendMail(account, to, subject, text) {
-  const transporter = nodemailer.createTransport({
-    host: account.smtp,
-    port: account.smtp_port,
-    secure: account.smtp_port === 465,
-    auth: { user: account.user, pass: account.pass },
-  });
+// Rota de saúde
+app.get("/", (req, res) => {
+  res.send("API de e-mail do Pilar Mail está rodando ✅");
+});
 
-  const info = await transporter.sendMail({
-    from: account.user,
-    to,
-    subject,
-    text,
-  });
-
-  console.log(`📤 Email enviado por: ${account.user} - ID: ${info.messageId}`);
-  return info.messageId;
-}
-
-async function checkMail(account) {
-  const client = new ImapFlow({
-    host: account.imap,
-    port: account.imap_port,
-    secure: true,
-    auth: { user: account.user, pass: account.pass },
-  });
-
-  await client.connect();
-  console.log(`📥 Conectado ao IMAP: ${account.user}`);
-
-  let lock = await client.getMailboxLock("INBOX");
-  const subjects = [];
-
+/**
+ * Rota para envio de e-mail.
+ * O Lovable deve mandar um POST para /send-email com JSON:
+ *
+ * {
+ *   "smtpHost": "smtp.servidor.com",
+ *   "smtpPort": 465,
+ *   "smtpSecure": true,
+ *   "user": "usuario@dominio.com",
+ *   "pass": "SENHA_OU_TOKEN_APP",
+ *   "from": "Nome <usuario@dominio.com>",   // opcional, se não vier usa user
+ *   "to": "destinatario@dominio.com",
+ *   "subject": "Assunto do e-mail",
+ *   "text": "Corpo em texto simples",
+ *   "html": "<p>Corpo em HTML</p>"          // opcional
+ * }
+ */
+app.post("/send-email", async (req, res) => {
   try {
-    for await (let msg of client.fetch("1:*", { envelope: true })) {
-      const subject = msg.envelope.subject;
-      subjects.push(subject);
-      console.log(`📩 ${account.user} → ${subject}`);
-    }
-  } finally {
-    lock.release();
-  }
+    const {
+      smtpHost,
+      smtpPort,
+      smtpSecure,
+      user,
+      pass,
+      from,
+      to,
+      subject,
+      text,
+      html
+    } = req.body;
 
-  await client.logout();
-  return subjects;
-}
-
-// ========= ROTA PARA LOVABLE =========
-// Lovable envia JSON com { accounts: [...], to, subject, text }
-app.post("/send-emails", async (req, res) => {
-  try {
-    let { accounts, to, subject, text } = req.body;
-
-    // Se não vier accounts na requisição, tenta carregar do arquivo (opcional)
-    if (!accounts || !accounts.length) {
-      if (!process.env.EMAILS_CONFIG) {
-        return res.status(400).json({ error: "Sem accounts e sem EMAILS_CONFIG" });
-      }
-      const path = process.env.EMAILS_CONFIG;
-      console.log("Carregando contas de:", path);
-      const raw = fs.readFileSync(path, "utf8");
-      accounts = JSON.parse(raw);
-    }
-
-    const results = [];
-
-    for (const account of accounts) {
-      const msgId = await sendMail(
-        account,
-        to || account.user,
-        subject || "Teste via API",
-        text || "Mensagem de teste via Lovable"
-      );
-      const subjects = await checkMail(account);
-
-      results.push({
-        user: account.user,
-        messageId: msgId,
-        lastSubjects: subjects.slice(-5),
+    if (!smtpHost || !smtpPort || !user || !pass || !to || !subject) {
+      return res.status(400).json({
+        ok: false,
+        error: "Campos obrigatórios: smtpHost, smtpPort, user, pass, to, subject"
       });
     }
 
-    res.json({ ok: true, results });
+    const transporter = nodemailer.createTransport({
+      host: smtpHost,
+      port: Number(smtpPort),
+      secure: Boolean(smtpSecure), // true para 465, false normalmente para 587
+      auth: {
+        user,
+        pass
+      }
+    });
+
+    const mailOptions = {
+      from: from || user,
+      to,
+      subject,
+      text: text || undefined,
+      html: html || undefined
+    };
+
+    const info = await transporter.sendMail(mailOptions);
+
+    console.log(`📤 Email enviado por ${user} → ${to} | ID: ${info.messageId}`);
+
+    return res.json({
+      ok: true,
+      messageId: info.messageId,
+      to,
+      from: mailOptions.from
+    });
   } catch (err) {
-    console.error("❌ Erro /send-emails:", err);
-    res.status(500).json({ ok: false, error: String(err) });
+    console.error("❌ Erro em /send-email:", err);
+    return res.status(500).json({
+      ok: false,
+      error: String(err)
+    });
   }
 });
 
-// ========= INICIAR SERVIDOR =========
+// Sobe servidor HTTP
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log("🚀 API de e-mail rodando na porta", PORT);
+  console.log(`🚀 Pilar Mail rodando na porta ${PORT}`);
 });
-
-start();
